@@ -290,7 +290,7 @@ func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 			for i, attr := range n.Attr {
 				var attrURL string
 				switch n.Data {
-				case "a", "link":
+				case "link":
 					if attr.Key == "href" {
 						attrURL = attr.Val
 					}
