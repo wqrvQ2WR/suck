@@ -65,6 +65,12 @@ func printHelp() {
     suck -v example.com                    (verbose mode)
     suck -o /path/to/dir example.com       (custom output dir)
 
+  NOTES:
+    MHTML mode works best for static HTML sites (Wikipedia, blogs, docs).
+    JS-heavy sites (Vue/React SPAs like namu.wiki) need folder mode + -serve:
+      suck -name mysite https://example.com   # save as folder
+      suck -serve mysite                      # serve locally
+
   SERVE:
     suck -serve example.com
     suck -serve -p 3000 example.com        (custom port)

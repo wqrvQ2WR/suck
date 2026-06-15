@@ -65,6 +65,20 @@ suck -serve example.com            # Serve locally via HTTP
 suck -serve -p 3000 example.com    # Custom port
 ```
 
+### MHTML (single file)
+
+```bash
+suck -mhtml https://example.com    # Save as .mhtml file
+suck -mhtml -name foo https://...  # Custom name
+```
+
+> **⚠️ MHTML warning:** Works best for static HTML sites (Wikipedia, blogs, docs).
+> JS-heavy Vue/React SPAs (namu.wiki, Naver) need folder mode instead:
+> ```bash
+> suck -name mysite https://spa.example.com   # folder mode
+> suck -serve mysite                            # serve locally
+> ```
+
 ### Manage
 
 ```bash
@@ -99,7 +113,14 @@ Saved sites live in `~/.suck/<domain>/`:
 | `example.com` | ✅ |
 
 **Works best with:** static sites, documentation, blogs, forums, news sites  
-**Limited:** heavy JS-driven SPAs (React, Next.js), sites that require login
+
+**⚠️ Vue/React SPA sites** (e.g. namu.wiki): MHTML mode has limited JS support.  
+Use folder mode + `suck -serve` instead:
+
+```bash
+suck -name mysite https://spa-site.com   # save as folder
+suck -serve mysite                        # serve with full JS support
+```
 
 ## 🛠️ How it works
 
