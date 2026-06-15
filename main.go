@@ -896,6 +896,16 @@ func serveSaved() {
 	siteDir := filepath.Join(outputDir, domain)
 
 	if _, err := os.Stat(siteDir); os.IsNotExist(err) {
+		// Check if .mhtml file exists instead
+		mhtmlPath := filepath.Join(outputDir, domain+".mhtml")
+		if _, err := os.Stat(mhtmlPath); err == nil {
+			fmt.Fprintf(os.Stderr, "❌ '%s' is an MHTML file, not a folder.\n", domain)
+			fmt.Fprintf(os.Stderr, "   MHTML files open directly in your browser:\n")
+			fmt.Fprintf(os.Stderr, "     suck open %s\n", domain)
+			fmt.Fprintf(os.Stderr, "   Or save as folder first for -serve mode:\n")
+			fmt.Fprintf(os.Stderr, "     suck -name %s <url>\n", domain)
+			os.Exit(1)
+		}
 		fmt.Fprintf(os.Stderr, "❌ '%s' not found in %s. Suck it first!\n", domain, outputDir)
 		os.Exit(1)
 	}
