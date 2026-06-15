@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
@@ -21,10 +22,12 @@ import (
 )
 
 var (
-	outputDir string
-	port      string
-	serveMode bool
-	verbose   bool
+	outputDir   string
+	port        string
+	serveMode   bool
+	verbose     bool
+	mhtmlMode   bool
+	saveName    string
 )
 
 func init() {
@@ -33,6 +36,8 @@ func init() {
 	flag.StringVar(&port, "p", "8080", "Port for serve mode")
 	flag.BoolVar(&serveMode, "serve", false, "Serve saved site")
 	flag.BoolVar(&verbose, "v", false, "Verbose output")
+	flag.BoolVar(&mhtmlMode, "mhtml", false, "Save as single .mhtml file")
+	flag.StringVar(&saveName, "name", "", "Custom save name (default: domain)")
 }
 
 func logf(format string, args ...interface{}) {
@@ -45,22 +50,24 @@ func printHelp() {
 	fmt.Println(`  suck - Shadow a website for offline viewing
 
   USAGE:
-    suck [options] <url>          Download a website
-    suck -serve [options] <domain>  Serve a saved site locally
-    suck ls                         List saved websites
-    suck rm <domain>                Delete a saved website
-    suck open <domain>              Open saved site in browser
-    suck help                       Show this help
+    suck [options] <url>              Download a website
+    suck -serve [options] <domain>     Serve a saved site locally
+    suck ls                            List saved websites (folder mode)
+    suck rm <domain>                   Delete a saved website
+    suck open <domain>                 Open saved site in browser
+    suck help                          Show this help
 
   DOWNLOAD:
     suck https://example.com
-    suck example.com                   (https:// is automatic)
-    suck -v example.com                (verbose mode)
-    suck -o /path/to/dir example.com   (custom output dir)
+    suck example.com                       (https:// is automatic)
+    suck -mhtml https://example.com        Save as single .mhtml file
+    suck -name mypage https://example.com  Save with custom name
+    suck -v example.com                    (verbose mode)
+    suck -o /path/to/dir example.com       (custom output dir)
 
   SERVE:
     suck -serve example.com
-    suck -serve -p 3000 example.com   (custom port)
+    suck -serve -p 3000 example.com        (custom port)
 
   MANAGE:
     suck ls                          List all saved sites
@@ -73,15 +80,20 @@ func printHelp() {
     -o <dir>        Output directory (default: ~/.suck/)
     -serve          Serve mode (serve a saved site locally)
     -p <port>       Port for serve mode (default: 8080)
+    -mhtml          Save as single .mhtml file instead of folder
+    -name <name>    Custom save name (default: domain)
 
   EXAMPLES:
-    suck news.ycombinator.com           # Save HN for offline reading
-    suck ls                             # See all saved sites
-    suck open news.ycombinator.com      # Open saved HN in browser
-    suck rm example.com                 # Delete a saved site
+    suck news.ycombinator.com                 # Save HN for offline reading
+    suck -mhtml https://namu.wiki/wiki/Go     # Save as .mhtml
+    suck -mhtml -name golang wiki.example.com # .mhtml with custom name
+    suck ls                                   # See all saved sites
+    suck open wiki.example.com                # Open saved site in browser
+    suck rm example.com                       # Delete a saved site
 
   FILES:
-    Saved sites go to ~/.suck/<domain>/`)
+    Folder mode: ~/.suck/<domain>/
+    MHTML mode:  ~/.suck/<name>.mhtml`)
 }
 
 func listSaved() {
@@ -96,7 +108,6 @@ func listSaved() {
 		return
 	}
 
-	// Collect and sort by modification time
 	type site struct {
 		name string
 		time time.Time
@@ -104,39 +115,47 @@ func listSaved() {
 	}
 	var sites []site
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		var totalSize int64
-		filepath.Walk(filepath.Join(outputDir, e.Name()), func(p string, fi os.FileInfo, err error) error {
-			if err == nil && !fi.IsDir() {
-				totalSize += fi.Size()
-			}
-			return nil
-		})
-		sites = append(sites, site{name: e.Name(), time: info.ModTime(), size: totalSize})
+		if e.IsDir() {
+			var totalSize int64
+			filepath.Walk(filepath.Join(outputDir, e.Name()), func(p string, fi os.FileInfo, err error) error {
+				if err == nil && !fi.IsDir() {
+					totalSize += fi.Size()
+				}
+				return nil
+			})
+			sites = append(sites, site{name: e.Name(), time: info.ModTime(), size: totalSize})
+		} else if strings.HasSuffix(e.Name(), ".mhtml") {
+			sites = append(sites, site{name: e.Name(), time: info.ModTime(), size: info.Size()})
+		}
 	}
 	sort.Slice(sites, func(i, j int) bool { return sites[i].time.After(sites[j].time) })
 
 	fmt.Println("📂 Saved websites:")
 	for _, s := range sites {
-		sizeStr := fmtSize(s.size)
-		fmt.Printf("  %-30s %s  (%s)\n", s.name, s.time.Format("Jan _2 15:04"), sizeStr)
+		suffix := ""
+		if strings.HasSuffix(s.name, ".mhtml") {
+			suffix = " (mhtml)"
+		}
+		fmt.Printf("  %-30s %s  (%s)%s\n", s.name, s.time.Format("Jan _2 15:04"), fmtSize(s.size), suffix)
 	}
 	fmt.Printf("\n  📁 %s\n", outputDir)
 }
 
-func removeSaved(domain string) {
-	target := filepath.Join(outputDir, domain)
+func removeSaved(name string) {
+	target := filepath.Join(outputDir, name)
 	if _, err := os.Stat(target); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "❌ '%s' not found in %s\n", domain, outputDir)
-		return
+		// Try with .mhtml extension
+		target = filepath.Join(outputDir, name+".mhtml")
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "❌ '%s' not found in %s\n", name, outputDir)
+			return
+		}
 	}
-	fmt.Printf("🗑️  Removing %s... ", domain)
+	fmt.Printf("🗑️  Removing %s... ", filepath.Base(target))
 	if err := os.RemoveAll(target); err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Failed: %v\n", err)
 		return
@@ -144,11 +163,14 @@ func removeSaved(domain string) {
 	fmt.Println("Done!")
 }
 
-func openSaved(domain string) {
-	target := filepath.Join(outputDir, domain, "index.html")
+func openSaved(name string) {
+	target := filepath.Join(outputDir, name, "index.html")
 	if _, err := os.Stat(target); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "❌ '%s' not found. Suck it first!\n", domain)
-		return
+		target = filepath.Join(outputDir, name+".mhtml")
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "❌ '%s' not found. Suck it first!\n", name)
+			return
+		}
 	}
 	absPath, _ := filepath.Abs(target)
 	fmt.Printf("🌐 Opening %s...\n", absPath)
@@ -202,14 +224,14 @@ func main() {
 		return
 	case "rm", "remove", "delete":
 		if flag.NArg() < 2 {
-			fmt.Println("Usage: suck rm <domain>")
+			fmt.Println("Usage: suck rm <name>")
 			os.Exit(1)
 		}
 		removeSaved(flag.Arg(1))
 		return
 	case "open":
 		if flag.NArg() < 2 {
-			fmt.Println("Usage: suck open <domain>")
+			fmt.Println("Usage: suck open <name>")
 			os.Exit(1)
 		}
 		openSaved(flag.Arg(1))
@@ -233,19 +255,35 @@ func main() {
 	}
 
 	domain := u.Hostname()
-	siteDir := filepath.Join(outputDir, domain)
-	if err := os.MkdirAll(siteDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "Cannot create dir: %v\n", err)
-		os.Exit(1)
+	name := domain
+	if saveName != "" {
+		name = saveName
 	}
 
-	fmt.Printf("🌐 Sucking %s into %s/\n", rawURL, siteDir)
-	if err := suckPage(rawURL, siteDir, u); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error: %v\n", err)
-		os.Exit(1)
+	if mhtmlMode {
+		savePath := filepath.Join(outputDir, name+".mhtml")
+		fmt.Printf("🌐 Sucking %s → %s\n", rawURL, savePath)
+		if err := suckMHTML(rawURL, savePath, u); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("\n✅ Saved! Open with:\n   suck open %s\n   Or: open %s\n", name, savePath)
+	} else {
+		siteDir := filepath.Join(outputDir, name)
+		if err := os.MkdirAll(siteDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "Cannot create dir: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("🌐 Sucking %s into %s/\n", rawURL, siteDir)
+		if err := suckPage(rawURL, siteDir, u); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("\n✅ Saved! Open with:\n   suck -serve %s\n   Or: suck open %s\n", name, name)
 	}
-	fmt.Printf("\n✅ Saved! Open with:\n   suck -serve %s\n   Or: cd %s && python3 -m http.server\n", domain, siteDir)
 }
+
+// ── Folder mode ──────────────────────────────────────────────────────────
 
 func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 	logf("Fetching %s", pageURL)
@@ -273,7 +311,6 @@ func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 		return fmt.Errorf("parse HTML: %w", err)
 	}
 
-	// Phase 1: collect all asset URLs from HTML
 	downloaded := make(map[string]bool)
 	type asset struct {
 		url       string
@@ -329,23 +366,287 @@ func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 	}
 	walkCollect(doc)
 
-	// Phase 2: download with progress bar
+	// Phase 2: download with progress
 	progTotal = len(assets)
 	if progTotal > 0 && !verbose {
 		renderProgress()
 	}
 	for _, a := range assets {
-		// Update the HTML attribute before downloading
 		a.node.Attr[a.attrIdx].Val = a.relPath
 		downloadAsset(a.url, a.localPath, pageURL, siteDir, downloaded)
 	}
 	if !verbose && progTotal > 0 {
-		// Ensure final newline
 		fmt.Fprintln(os.Stderr)
+	}
+
+	// Write rewritten HTML
+	var buf strings.Builder
+	if err := html.Render(&buf, doc); err != nil {
+		return err
+	}
+	if err := os.WriteFile(savePath, []byte(buf.String()), 0644); err != nil {
+		return err
 	}
 
 	return nil
 }
+
+// ── MHTML mode ───────────────────────────────────────────────────────────
+
+type mhtmlPart struct {
+	url         string
+	contentType string
+	data        []byte
+}
+
+func suckMHTML(pageURL string, savePath string, baseURL *url.URL) error {
+	logf("Fetching %s", pageURL)
+	resp, err := httpGet(pageURL)
+	if err != nil {
+		return fmt.Errorf("fetch %s: %w", pageURL, err)
+	}
+	defer resp.Body.Close()
+
+	htmlData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	// Parse HTML
+	doc, err := html.Parse(strings.NewReader(string(htmlData)))
+	if err != nil {
+		return fmt.Errorf("parse HTML: %w", err)
+	}
+
+	downloaded := make(map[string]bool)
+	var parts []mhtmlPart
+
+	// Collect assets
+	var walkCollect func(*html.Node)
+	walkCollect = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			for _, attr := range n.Attr {
+				var attrURL string
+				switch n.Data {
+				case "link":
+					if attr.Key == "href" {
+						attrURL = attr.Val
+					}
+				case "img", "script", "source", "iframe", "video", "audio":
+					if attr.Key == "src" {
+						attrURL = attr.Val
+					}
+				}
+
+				if attrURL == "" {
+					continue
+				}
+				if strings.HasPrefix(attrURL, "data:") || strings.HasPrefix(attrURL, "javascript:") ||
+					strings.HasPrefix(attrURL, "mailto:") || strings.HasPrefix(attrURL, "tel:") ||
+					strings.HasPrefix(attrURL, "#") {
+					continue
+				}
+
+				resolved := resolveURL(attrURL, pageURL)
+				if resolved == "" || !isSameDomain(resolved, baseURL.Hostname()) {
+					continue
+				}
+				if downloaded[resolved] {
+					continue
+				}
+				downloaded[resolved] = true
+
+				if n.Data == "link" || n.Data == "script" || n.Data == "img" || n.Data == "source" ||
+					n.Data == "iframe" || n.Data == "video" || n.Data == "audio" {
+					// We'll download after collecting
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walkCollect(c)
+		}
+	}
+	walkCollect(doc)
+
+	// Download all assets
+	assetURLs := make([]string, 0, len(downloaded))
+	for u := range downloaded {
+		// Skip if not a real asset (page links aren't downloaded)
+		if strings.Contains(u, "/w/") || strings.Count(u, "/") <= 2 {
+			continue // likely a wiki page, not an asset
+		}
+		assetURLs = append(assetURLs, u)
+	}
+
+	progTotal = len(assetURLs) + 1 // +1 for HTML itself
+	if !verbose {
+		renderProgress()
+	}
+
+	// Download HTML as first part
+	ct := detectContentType(pageURL, htmlData)
+	parts = append(parts, mhtmlPart{url: pageURL, contentType: ct, data: htmlData})
+	if !verbose {
+		progressInc()
+	}
+
+	// Download each asset
+	for _, assetURL := range assetURLs {
+		data, ct, err := downloadData(assetURL)
+		if err != nil {
+			logf("  ⚠ %s: %v", assetURL, err)
+			if !verbose {
+				progressInc()
+			}
+			continue
+		}
+		parts = append(parts, mhtmlPart{url: assetURL, contentType: ct, data: data})
+		if !verbose {
+			progName = extractShortPath(assetURL)
+			progressInc()
+		}
+	}
+	if !verbose {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	// Generate MHTML
+	boundary := fmt.Sprintf("suck-boundary-%d", time.Now().UnixNano())
+	var mhtmlBuf strings.Builder
+
+	mhtmlBuf.WriteString("From: <saved by suck>\n")
+	mhtmlBuf.WriteString("Subject: \n")
+	mhtmlBuf.WriteString("Date: " + time.Now().Format(time.RFC1123) + "\n")
+	mhtmlBuf.WriteString("MIME-Version: 1.0\n")
+	mhtmlBuf.WriteString("Content-Type: multipart/related; boundary=\"" + boundary + "\"\n\n")
+
+	for _, part := range parts {
+		mhtmlBuf.WriteString("--" + boundary + "\n")
+		mhtmlBuf.WriteString("Content-Type: " + part.contentType + "\n")
+		mhtmlBuf.WriteString("Content-Location: " + part.url + "\n")
+
+		if isBinaryContentType(part.contentType) {
+			mhtmlBuf.WriteString("Content-Transfer-Encoding: base64\n\n")
+			encoded := base64.StdEncoding.EncodeToString(part.data)
+			// Split into 76-char lines
+			for i := 0; i < len(encoded); i += 76 {
+				end := i + 76
+				if end > len(encoded) {
+					end = len(encoded)
+				}
+				mhtmlBuf.WriteString(encoded[i:end] + "\n")
+			}
+		} else {
+			mhtmlBuf.WriteString("Content-Transfer-Encoding: quoted-printable\n\n")
+			mhtmlBuf.WriteString(string(part.data))
+			if !strings.HasSuffix(string(part.data), "\n") {
+				mhtmlBuf.WriteString("\n")
+			}
+		}
+		mhtmlBuf.WriteString("\n")
+	}
+	mhtmlBuf.WriteString("--" + boundary + "--\n")
+
+	if err := os.WriteFile(savePath, []byte(mhtmlBuf.String()), 0644); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func downloadData(assetURL string) ([]byte, string, error) {
+	resp, err := httpGet(assetURL)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+
+	ct := detectContentType(assetURL, data)
+	return data, ct, nil
+}
+
+func detectContentType(urlStr string, data []byte) string {
+	// Try from URL extension first
+	ext := strings.ToLower(path.Ext(urlStr))
+	switch ext {
+	case ".css":
+		return "text/css"
+	case ".js":
+		return "application/javascript"
+	case ".json":
+		return "application/json"
+	case ".svg":
+		return "image/svg+xml"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	case ".ttf":
+		return "font/ttf"
+	case ".otf":
+		return "font/otf"
+	case ".ico":
+		return "image/x-icon"
+	case ".html", ".htm":
+		return "text/html"
+	case ".xml":
+		return "text/xml"
+	case ".webp":
+		return "image/webp"
+	case ".avif":
+		return "image/avif"
+	case ".mp4":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wasm":
+		return "application/wasm"
+	}
+
+	// Fall back to MIME sniffing
+	ct := http.DetectContentType(data)
+	if ct != "" {
+		return ct
+	}
+	return "application/octet-stream"
+}
+
+func isBinaryContentType(ct string) bool {
+	binaryPrefixes := []string{
+		"image/", "video/", "audio/", "font/",
+		"application/octet-stream", "application/wasm",
+		"application/pdf", "application/zip",
+	}
+	ctLower := strings.ToLower(ct)
+	for _, p := range binaryPrefixes {
+		if strings.HasPrefix(ctLower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractShortPath(assetURL string) string {
+	u, _ := url.Parse(assetURL)
+	p := u.Path
+	if len(p) > 28 {
+		p = p[:25] + "..."
+	}
+	return p
+}
+
+// ── Shared helpers ────────────────────────────────────────────────────────
 
 func httpGet(url string) (*http.Response, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -378,7 +679,6 @@ func isSameDomain(rawURL, domain string) bool {
 	if host == "" || host == domain {
 		return true
 	}
-	// Allow subdomains: static.namu.wiki for namu.wiki
 	return strings.HasSuffix(host, "."+domain)
 }
 
@@ -388,7 +688,6 @@ func urlToPath(rawURL string, siteDir string) string {
 	if p == "" || p == "/" {
 		p = "/index.html"
 	}
-	// Preserve file extension
 	ext := path.Ext(p)
 	if ext == "" {
 		p = path.Join(p, "index.html")
@@ -406,6 +705,8 @@ func localToRel(localPath, siteDir string) string {
 	}
 	return rel
 }
+
+// ── CSS URL parsing ─────────────────────────────────────────────────────
 
 var (
 	cssURLRegex  = regexp.MustCompile(`url\((['"]?)([^'")\s]+)(['"]?)\)`)
@@ -435,7 +736,7 @@ func progressInc() {
 
 func renderProgress() {
 	if verbose {
-		return // verbose mode shows individual lines instead
+		return
 	}
 	w := 20
 	ratio := 0.0
@@ -451,7 +752,6 @@ func renderProgress() {
 	if len(name) > 28 {
 		name = name[:25] + "..."
 	}
-	// Pad to clear previous line
 	fmt.Fprintf(os.Stderr, "\r  📦 [%s] %3d/%d  %-28s", bar, progDone, progTotal, name)
 	if progDone >= progTotal && progTotal > 0 {
 		fmt.Fprintf(os.Stderr, "\r  📦 [%s] %3d/%d  %-28s\n", bar, progDone, progTotal, name)
@@ -505,7 +805,6 @@ func downloadAsset(assetURL, localPath, pageURL, siteDir string, downloaded map[
 	if verbose {
 		logf("  ↓ %s", assetURL)
 	} else {
-		// Extract short filename for the progress bar
 		u, _ := url.Parse(assetURL)
 		short := u.Path
 		if len(short) > 28 {
@@ -517,25 +816,21 @@ func downloadAsset(assetURL, localPath, pageURL, siteDir string, downloaded map[
 		progressInc()
 	}
 
-	// If this is a CSS file, parse it for url() and @import references
+	// Parse CSS for url() references
 	if strings.HasSuffix(assetURL, ".css") {
 		processCSSRefs(string(data), assetURL, pageURL, siteDir, downloaded)
 	}
 }
 
 func processCSSRefs(cssContent, cssURL, pageURL, siteDir string, downloaded map[string]bool) {
-	// Find all url(...) references
 	seen := make(map[string]bool)
 	patterns := []*regexp.Regexp{cssURLRegex, cssImportURL, cssFontFace}
 
 	for _, re := range patterns {
 		matches := re.FindAllStringSubmatch(cssContent, -1)
 		for _, m := range matches {
-			ref := m[2] // The URL inside url(...)
-			if ref == "" {
-				continue
-			}
-			if seen[ref] {
+			ref := m[2]
+			if ref == "" || seen[ref] {
 				continue
 			}
 			seen[ref] = true
@@ -554,7 +849,6 @@ func processCSSRefs(cssContent, cssURL, pageURL, siteDir string, downloaded map[
 		}
 	}
 
-	// Find @import "..." or @import '...'
 	impMatches := cssImportStr.FindAllStringSubmatch(cssContent, -1)
 	for _, m := range impMatches {
 		ref := m[1]
@@ -585,6 +879,8 @@ func extractDomain(rawURL string) string {
 	return u.Hostname()
 }
 
+// ── Serve mode ────────────────────────────────────────────────────────────
+
 func serveSaved() {
 	if flag.NArg() < 1 {
 		fmt.Println("Usage: suck -serve <domain>")
@@ -594,7 +890,7 @@ func serveSaved() {
 	siteDir := filepath.Join(outputDir, domain)
 
 	if _, err := os.Stat(siteDir); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "❌ %s not found in %s. Suck it first!\n", domain, outputDir)
+		fmt.Fprintf(os.Stderr, "❌ '%s' not found in %s. Suck it first!\n", domain, outputDir)
 		os.Exit(1)
 	}
 
