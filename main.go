@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -304,7 +305,7 @@ func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 
 						if !downloaded[resolved] {
 							downloaded[resolved] = true
-							downloadAsset(resolved, localPath)
+														downloadAsset(resolved, localPath, pageURL, siteDir, downloaded)
 						}
 						n.Attr[i].Val = relPath
 					}
@@ -375,7 +376,14 @@ func localToRel(localPath, siteDir string) string {
 	return rel
 }
 
-func downloadAsset(assetURL, localPath string) {
+var (
+	cssURLRegex  = regexp.MustCompile(`url\((['"]?)([^'")\s]+)(['"]?)\)`)
+	cssImportURL = regexp.MustCompile(`@import\s+url\((['"]?)([^'")\s]+)(['"]?)\)`)
+	cssImportStr = regexp.MustCompile(`@import\s+['"]([^'"]+)['"]`)
+	cssFontFace  = regexp.MustCompile(`src:\s*url\((['"]?)([^'")\s]+)(['"]?)\)`)
+)
+
+func downloadAsset(assetURL, localPath, pageURL, siteDir string, downloaded map[string]bool) {
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 		logf("  ⚠ mkdir: %v", err)
 		return
@@ -404,6 +412,73 @@ func downloadAsset(assetURL, localPath string) {
 		return
 	}
 	logf("  ↓ %s", assetURL)
+
+	// If this is a CSS file, parse it for url() and @import references
+	if strings.HasSuffix(assetURL, ".css") {
+		processCSSRefs(string(data), assetURL, pageURL, siteDir, downloaded)
+	}
+}
+
+func processCSSRefs(cssContent, cssURL, pageURL, siteDir string, downloaded map[string]bool) {
+	// Find all url(...) references
+	seen := make(map[string]bool)
+	patterns := []*regexp.Regexp{cssURLRegex, cssImportURL, cssFontFace}
+
+	for _, re := range patterns {
+		matches := re.FindAllStringSubmatch(cssContent, -1)
+		for _, m := range matches {
+			ref := m[2] // The URL inside url(...)
+			if ref == "" {
+				continue
+			}
+			if seen[ref] {
+				continue
+			}
+			seen[ref] = true
+
+			resolved := resolveURL(ref, cssURL)
+			if resolved == "" || !isSameDomain(resolved, extractDomain(cssURL)) {
+				continue
+			}
+			if downloaded[resolved] {
+				continue
+			}
+			downloaded[resolved] = true
+
+			localPath := urlToPath(resolved, siteDir)
+			downloadAsset(resolved, localPath, pageURL, siteDir, downloaded)
+		}
+	}
+
+	// Find @import "..." or @import '...'
+	impMatches := cssImportStr.FindAllStringSubmatch(cssContent, -1)
+	for _, m := range impMatches {
+		ref := m[1]
+		if ref == "" || seen[ref] {
+			continue
+		}
+		seen[ref] = true
+
+		resolved := resolveURL(ref, cssURL)
+		if resolved == "" || !isSameDomain(resolved, extractDomain(cssURL)) {
+			continue
+		}
+		if downloaded[resolved] {
+			continue
+		}
+		downloaded[resolved] = true
+
+		localPath := urlToPath(resolved, siteDir)
+		downloadAsset(resolved, localPath, pageURL, siteDir, downloaded)
+	}
+}
+
+func extractDomain(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func serveSaved() {
