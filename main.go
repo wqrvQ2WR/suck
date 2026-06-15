@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/html"
@@ -272,10 +273,19 @@ func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 		return fmt.Errorf("parse HTML: %w", err)
 	}
 
+	// Phase 1: collect all asset URLs from HTML
 	downloaded := make(map[string]bool)
+	type asset struct {
+		url       string
+		localPath string
+		relPath   string
+		node      *html.Node
+		attrIdx   int
+	}
+	var assets []asset
 
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
+	var walkCollect func(*html.Node)
+	walkCollect = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			for i, attr := range n.Attr {
 				var attrURL string
@@ -290,33 +300,49 @@ func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 					}
 				}
 
-				if attrURL != "" {
-					// Skip data:, javascript:, mailto:, etc.
-					if strings.HasPrefix(attrURL, "data:") || strings.HasPrefix(attrURL, "javascript:") ||
-						strings.HasPrefix(attrURL, "mailto:") || strings.HasPrefix(attrURL, "tel:") ||
-						strings.HasPrefix(attrURL, "#") {
-						continue
-					}
-
-					resolved := resolveURL(attrURL, pageURL)
-					if resolved != "" && isSameDomain(resolved, baseURL.Hostname()) {
-						localPath := urlToPath(resolved, siteDir)
-						relPath := localToRel(localPath, siteDir)
-
-						if !downloaded[resolved] {
-							downloaded[resolved] = true
-														downloadAsset(resolved, localPath, pageURL, siteDir, downloaded)
-						}
-						n.Attr[i].Val = relPath
-					}
+				if attrURL == "" {
+					continue
 				}
+				if strings.HasPrefix(attrURL, "data:") || strings.HasPrefix(attrURL, "javascript:") ||
+					strings.HasPrefix(attrURL, "mailto:") || strings.HasPrefix(attrURL, "tel:") ||
+					strings.HasPrefix(attrURL, "#") {
+					continue
+				}
+
+				resolved := resolveURL(attrURL, pageURL)
+				if resolved == "" || !isSameDomain(resolved, baseURL.Hostname()) {
+					continue
+				}
+				if downloaded[resolved] {
+					continue
+				}
+				downloaded[resolved] = true
+
+				localPath := urlToPath(resolved, siteDir)
+				relPath := localToRel(localPath, siteDir)
+				assets = append(assets, asset{url: resolved, localPath: localPath, relPath: relPath, node: n, attrIdx: i})
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+			walkCollect(c)
 		}
 	}
-	walk(doc)
+	walkCollect(doc)
+
+	// Phase 2: download with progress bar
+	progTotal = len(assets)
+	if progTotal > 0 && !verbose {
+		renderProgress()
+	}
+	for _, a := range assets {
+		// Update the HTML attribute before downloading
+		a.node.Attr[a.attrIdx].Val = a.relPath
+		downloadAsset(a.url, a.localPath, pageURL, siteDir, downloaded)
+	}
+	if !verbose && progTotal > 0 {
+		// Ensure final newline
+		fmt.Fprintln(os.Stderr)
+	}
 
 	return nil
 }
@@ -381,37 +407,110 @@ var (
 	cssImportURL = regexp.MustCompile(`@import\s+url\((['"]?)([^'")\s]+)(['"]?)\)`)
 	cssImportStr = regexp.MustCompile(`@import\s+['"]([^'"]+)['"]`)
 	cssFontFace  = regexp.MustCompile(`src:\s*url\((['"]?)([^'")\s]+)(['"]?)\)`)
+
+	progressMu sync.Mutex
+	progDone   int
+	progTotal  int
+	progName   string
 )
+
+func progressAdd(n int) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	progTotal += n
+	renderProgress()
+}
+
+func progressInc() {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	progDone++
+	renderProgress()
+}
+
+func renderProgress() {
+	if verbose {
+		return // verbose mode shows individual lines instead
+	}
+	w := 20
+	ratio := 0.0
+	if progTotal > 0 {
+		ratio = float64(progDone) / float64(progTotal)
+		if ratio > 1.0 {
+			ratio = 1.0
+		}
+	}
+	filled := int(ratio * float64(w))
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", w-filled)
+	name := progName
+	if len(name) > 28 {
+		name = name[:25] + "..."
+	}
+	// Pad to clear previous line
+	fmt.Fprintf(os.Stderr, "\r  📦 [%s] %3d/%d  %-28s", bar, progDone, progTotal, name)
+	if progDone >= progTotal && progTotal > 0 {
+		fmt.Fprintf(os.Stderr, "\r  📦 [%s] %3d/%d  %-28s\n", bar, progDone, progTotal, name)
+	}
+}
 
 func downloadAsset(assetURL, localPath, pageURL, siteDir string, downloaded map[string]bool) {
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		if !verbose {
+			progressInc()
+		}
 		logf("  ⚠ mkdir: %v", err)
 		return
 	}
 
 	resp, err := httpGet(assetURL)
 	if err != nil {
+		if !verbose {
+			progressInc()
+		}
 		logf("  ⚠ fetch %s: %v", assetURL, err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if !verbose {
+			progressInc()
+		}
 		logf("  ⚠ %s → HTTP %d", assetURL, resp.StatusCode)
 		return
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if !verbose {
+			progressInc()
+		}
 		logf("  ⚠ read %s: %v", assetURL, err)
 		return
 	}
 
 	if err := os.WriteFile(localPath, data, 0644); err != nil {
+		if !verbose {
+			progressInc()
+		}
 		logf("  ⚠ write %s: %v", localPath, err)
 		return
 	}
-	logf("  ↓ %s", assetURL)
+
+	if verbose {
+		logf("  ↓ %s", assetURL)
+	} else {
+		// Extract short filename for the progress bar
+		u, _ := url.Parse(assetURL)
+		short := u.Path
+		if len(short) > 28 {
+			short = short[:25] + "..."
+		}
+		progressMu.Lock()
+		progName = short
+		progressMu.Unlock()
+		progressInc()
+	}
 
 	// If this is a CSS file, parse it for url() and @import references
 	if strings.HasSuffix(assetURL, ".css") {
