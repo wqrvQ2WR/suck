@@ -348,7 +348,7 @@ func suckPage(pageURL string, siteDir string, baseURL *url.URL) error {
 }
 
 func httpGet(url string) (*http.Response, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -374,7 +374,12 @@ func isSameDomain(rawURL, domain string) bool {
 	if err != nil {
 		return false
 	}
-	return u.Hostname() == domain || u.Hostname() == ""
+	host := u.Hostname()
+	if host == "" || host == domain {
+		return true
+	}
+	// Allow subdomains: static.namu.wiki for namu.wiki
+	return strings.HasSuffix(host, "."+domain)
 }
 
 func urlToPath(rawURL string, siteDir string) string {
